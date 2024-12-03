@@ -4,104 +4,131 @@ local act = wezterm.action
 -- WorkspaceManager to encapsulate the state
 local WorkspaceManager = {
 	project_base = {},
-	cached_directories = nil, -- Cache for directories
+	exclude_dirs = { ".git", ".svn", ".hg", ".idea", ".vscode", ".DS_Store", "__pycache__" },
+	cached_directories = {},
+	cached_checksum = nil,
 }
 
 local is_windows = string.find(wezterm.target_triple, "windows") ~= nil
 
---- Utility function for logging errors and returning them
----@param message string
----@return nil, string
-local function log_and_return_error(message)
-	wezterm.log_error(message)
-	return nil, message
-end
-
---- Utility function for retrying commands in case of failures
+--- Retry a command in case of failures
 ---@param cmd table
 ---@param retries number
 ---@param delay number
----@return string|nil, string|nil
+---@return boolean, string|nil
 local function retry_command(cmd, retries, delay)
 	for attempt = 1, retries do
-        local success, result, err = command_run_with_retry(cmd)
+		local success, stdout = wezterm.run_child_process(cmd)
 		if success then
-			return result
+			return true, stdout
+		elseif attempt < retries then
+			wezterm.log_error(
+				"Retrying command: " .. table.concat(cmd, " ") .. " (Attempt " .. attempt .. " of " .. retries .. ")"
+			)
+			wezterm.sleep_ms(delay)
 		end
-		wezterm.log_error(
-			"Retrying command: " .. table.concat(cmd, " ") .. " (Attempt " .. attempt .. " of " .. retries .. ")"
-		)
-		wezterm.sleep_ms(delay)
 	end
-	return log_and_return_error("Command failed after " .. retries .. " attempts: " .. table.concat(cmd, " "))
+	return false, nil
 end
 
---- Runs a shell command and handles errors, with retry support
----@param cmd table
----@param retries number
----@param delay number
----@return string|nil, string|nil
-local function command_run_with_retry(cmd, retries, delay)
-	local stdout, stderr, success
-
-	if not cmd then
-		return log_and_return_error("No command provided to run")
+--- Calculates a checksum for directory paths to enable caching
+---@param directories table
+---@return string
+local function calculate_checksum(directories)
+	local hash = 0
+	for _, dir in ipairs(directories) do
+		local id = dir.id
+		for i = 1, #id do
+			hash = (hash * 31 + id:byte(i)) % 0xFFFFFFFF
+		end
 	end
+	return string.format("%08x", hash)
+end
 
+--- Construct exclusion flags dynamically based on platform
+local exclude_flags = {}
+for _, dir in ipairs(WorkspaceManager.exclude_dirs) do
+	table.insert(exclude_flags, is_windows and "-Exclude" or "--exclude")
+	table.insert(exclude_flags, dir)
+end
+
+--- Build the directory fetching command based on platform and available tools
+---@param base_path string
+---@return table command
+local function build_directory_command(base_path)
 	if is_windows then
-		local is_wsl = os.getenv("WSL_DISTRO_NAME") ~= nil
-		if is_wsl then
-			success, stdout, stderr = wezterm.run_child_process({ "wsl", table.unpack(cmd) })
-		else
-			success, stdout, stderr = wezterm.run_child_process({ "powershell", "-command", table.unpack(cmd) })
-		end
+		return { "Get-ChildItem", "-Path", base_path, "-Directory", table.unpack(exclude_flags) }
 	else
-		success, stdout, stderr = wezterm.run_child_process({ os.getenv("SHELL"), "-c", table.concat(cmd, " ") })
+		local fd_check = wezterm.run_child_process({ "command", "-v", "fd" })
+		if fd_check then
+			return {
+				"fd",
+				".",
+				"-H",
+				"--min-depth",
+				"1",
+				"--max-depth",
+				"3",
+				"-t",
+				"d",
+				base_path,
+				table.unpack(exclude_flags),
+			}
+		else
+			local command = { "find", base_path, "-mindepth", "1", "-maxdepth", "3", "-type", "d" }
+			for _, dir in ipairs(WorkspaceManager.exclude_dirs) do
+				table.insert(command, "(") -- Start group for each exclusion
+				table.insert(command, "-path")
+				table.insert(command, base_path .. "/" .. dir)
+				table.insert(command, "-prune")
+				table.insert(command, ")")
+				table.insert(command, "-o")
+			end
+			table.insert(command, "-print") -- Only one -print at the end
+			return command
+		end
 	end
-
-	if not success then
-		wezterm.log_error("Initial command failed: " .. (stderr or "Unknown error"))
-		return retry_command(cmd, retries, delay)
-	end
-
-	return stdout
 end
 
---- Fetch directories for workspace, leveraging caching and retrying
----@return table|nil
-local function get_directories()
-	if WorkspaceManager.cached_directories then
-		return WorkspaceManager.cached_directories -- Return cached data if available
+--- Fetch directories from a given base path with retry handling
+---@param base_path string
+---@return table directories
+local function fetch_directories_from_base(base_path)
+	local command = build_directory_command(base_path)
+	local success, out = retry_command(command, 3, 200)
+	if not success then
+		wezterm.log_error("Error fetching directories after retries for base path: " .. base_path)
+		return {}
 	end
 
 	local folders = {}
+	for _, path in ipairs(wezterm.split_by_newlines(out)) do
+		local updated_path = path:gsub(wezterm.home_dir, "~")
+		table.insert(folders, { id = path, label = updated_path })
+	end
+	return folders
+end
 
-	for _, base_path in ipairs(WorkspaceManager.project_base) do
-		local command = nil
-		if is_windows then
-			command = { "Get-ChildItem", "-Path", base_path, "-Directory" }
-		else
-			local fd_check_cmd = { "sh", "-c", "command -v fd" }
-			local fd_check = command_run_with_retry(fd_check_cmd, 3, 500) -- Retry fd check up to 3 times
-			if fd_check then
-				command = { "fd", ".", "-H", "--min-depth", "1", "--max-depth", "3", "-t", "d", base_path }
-			else
-				command = { "find", base_path, "-mindepth", "1", "-maxdepth", "3", "-type", "d" }
-			end
-		end
-
-		local out = command_run_with_retry(command, 3, 500) -- Retry the directory fetching command 3 times
-		if not out then
-			return log_and_return_error("Error fetching directories after retries")
-		end
-
-		for _, path in ipairs(wezterm.split_by_newlines(out)) do
-			local updated_path = path:gsub(wezterm.home_dir, "~")
-			table.insert(folders, { id = path, label = updated_path })
+--- Main function to fetch directories for workspace, leveraging caching and retrying
+---@return table directories
+local function get_directories()
+	if WorkspaceManager.cached_directories then
+		local current_checksum = calculate_checksum(WorkspaceManager.cached_directories)
+		if current_checksum == WorkspaceManager.cached_checksum then
+			return WorkspaceManager.cached_directories
 		end
 	end
 
-	WorkspaceManager.cached_directories = folders -- Cache the results after first run
+	local folders = {}
+	for _, base_path in ipairs(WorkspaceManager.project_base) do
+		local base_folders = fetch_directories_from_base(base_path)
+		for _, folder in ipairs(base_folders) do
+			table.insert(folders, folder)
+		end
+	end
+
+	WorkspaceManager.cached_directories = folders
+	WorkspaceManager.cached_checksum = calculate_checksum(folders)
 	return folders
 end
 
@@ -112,25 +139,18 @@ end
 ---@param label string|nil
 local function switch_workspace_logic(window, pane, id, label)
 	if not id or not label then
-		-- This is reached when the user exits or no result is found
 		wezterm.log_info("User exited the selection or no workspace selected.")
 		return
 	end
 
 	local full_path = label:gsub("^~", wezterm.home_dir)
-
-	local action_data = nil
-	if full_path:sub(1, 1) == "/" or full_path:sub(2, 2) == ":" then
-		action_data = {
-			name = label,
-			spawn = {
-				label = "Workspace: " .. label,
-				cwd = full_path,
-			},
-		}
-	else
-		action_data = { name = id }
-	end
+	local action_data = {
+		name = label,
+		spawn = {
+			label = "Workspace: " .. label,
+			cwd = full_path,
+		},
+	}
 
 	window:perform_action(act.SwitchToWorkspace(action_data), pane)
 end
@@ -139,24 +159,16 @@ end
 ---@return function
 local function workspace_switcher()
 	return wezterm.action_callback(function(window, pane)
-		-- Get directories before calling the coroutine-based action
 		local workspaces = get_directories()
-		if not workspaces or #workspaces == 0 or workspaces == nil then
+		if not workspaces or #workspaces == 0 then
 			wezterm.log_info("No workspaces found to select.")
 			return
 		end
 
-		-- Show the input selector to choose workspaces
 		window:perform_action(
 			act.InputSelector({
 				action = wezterm.action_callback(function(inner_window, inner_pane, id, label)
-					if not id and not label then
-						-- If no selection made, handle user exit
-						wezterm.log_info("User exited the selection.")
-					else
-						-- Handle valid workspace selection
-						switch_workspace_logic(inner_window, inner_pane, id, label)
-					end
+					switch_workspace_logic(inner_window, inner_pane, id, label)
 				end),
 				title = "Wezterm Sessionizer",
 				choices = workspaces,
@@ -173,7 +185,7 @@ local function configure(config)
 	table.insert(config.keys, {
 		key = "f",
 		mods = "LEADER",
-		action = workspace_switcher(), -- Trigger lazy directory fetching
+		action = workspace_switcher(),
 	})
 end
 
@@ -181,7 +193,8 @@ end
 ---@param paths table
 local function set_projects(paths)
 	WorkspaceManager.project_base = paths
-	WorkspaceManager.cached_directories = nil -- Reset cache when new paths are set
+	WorkspaceManager.cached_directories = nil
+	WorkspaceManager.cached_checksum = nil
 end
 
 --- Module return structure
