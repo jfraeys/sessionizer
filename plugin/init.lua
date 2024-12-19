@@ -54,38 +54,39 @@ end
 
 --- Build the directory fetching command based on platform and available tools
 ---@param base_path string
----@return table command
+---@return table cmd
 local function build_directory_command(base_path)
 	if is_windows then
+		-- On Windows, Get-ChildItem with -Directory flag ensures only directories (hidden or not) are listed
 		return { "Get-ChildItem", "-Path", base_path, "-Directory", table.unpack(exclude_flags) }
 	else
 		local fd_check = wezterm.run_child_process({ "command", "-v", "fd" })
 		if fd_check then
+			-- Use 'fd' for finding directories (hidden or not), no need for excluding hidden dirs manually
 			return {
 				"fd",
-				".",
-				"-H",
 				"--min-depth",
 				"1",
 				"--max-depth",
 				"3",
 				"-t",
-				"d",
+				"d", -- Only directories (hidden or not)
 				base_path,
 				table.unpack(exclude_flags),
 			}
 		else
-			local command = { "find", base_path, "-mindepth", "1", "-maxdepth", "3", "-type", "d" }
+			-- Fallback to 'find' for directories, no need for manual exclusion of hidden files
+			local cmd = { "find", base_path, "-mindepth", "1", "-maxdepth", "3", "-type", "d" } -- Only directories
 			for _, dir in ipairs(WorkspaceManager.exclude_dirs) do
-				table.insert(command, "(") -- Start group for each exclusion
-				table.insert(command, "-path")
-				table.insert(command, base_path .. "/" .. dir)
-				table.insert(command, "-prune")
-				table.insert(command, ")")
-				table.insert(command, "-o")
+				table.insert(cmd, "(") -- Start group for each exclusion
+				table.insert(cmd, "-path")
+				table.insert(cmd, base_path .. "/" .. dir)
+				table.insert(cmd, "-prune")
+				table.insert(cmd, ")")
+				table.insert(cmd, "-o")
 			end
-			table.insert(command, "-print") -- Only one -print at the end
-			return command
+			table.insert(cmd, "-print") -- Only one -print at the end
+			return cmd
 		end
 	end
 end
@@ -94,8 +95,8 @@ end
 ---@param base_path string
 ---@return table directories
 local function fetch_directories_from_base(base_path)
-	local command = build_directory_command(base_path)
-	local success, out = retry_command(command, 3, 200)
+	local cmd = build_directory_command(base_path)
+	local success, out = retry_command(cmd, 3, 200)
 	if not success then
 		wezterm.log_error("Error fetching directories after retries for base path: " .. base_path)
 		return {}
