@@ -1,6 +1,7 @@
 local wezterm = require("wezterm")
 local act = wezterm.action
-local workspace = require("workspaces")
+local command_builder = require("plugins.sessionizer.command_builder")
+local workspace = require("plugins.sessionizer.workspaces")
 
 local M = {}
 
@@ -15,15 +16,18 @@ local function switch_logic(win, pane, id, label)
 		return
 	end
 
-	-- Expand ~ to home directory reliably
-	local cwd = wezterm.expand_path(id)
+	local metadata = command_builder.meta_lookup[id] or {}
+
+	-- Determine workspace name: use metadata.workspace or fallback to basename of id
+	local workspace_name = metadata.workspace or wezterm.basename(id)
+	local title_label = metadata.title or ("Workspace: " .. label)
 
 	win:perform_action(
 		act.SwitchToWorkspace({
-			name = id, -- use the full path or unique ID as workspace name
+			name = workspace_name, -- Use workspace name from metadata or fallback
 			spawn = {
-				label = "Workspace: " .. label,
-				cwd = cwd,
+				label = title_label, -- Title shown on tab or workspace label
+				cwd = id, -- Start cwd for workspace
 			},
 		}),
 		pane
@@ -37,21 +41,19 @@ function M.make_switcher()
 		local choices = workspace.all_dirs()
 
 		if #choices == 0 then
-			-- Notify user visually that no workspaces are available
 			wezterm.toast_notification({
 				title = "Sessionizer",
-				message = "No workspaces found",
-				timeout_milliseconds = 3000,
+				message = "No projects found",
+				timeout_milliseconds = 2000,
 			})
 			return
 		end
 
 		win:perform_action(
 			act.InputSelector({
-				title = "WezTerm Sessionizer",
-				fuzzy = true, -- Enable fuzzy search
-				-- Case-insensitive search (default is true, but explicit is nice)
-				fuzzy_match_algorithm = "fzy",
+				title = "Sessionizer",
+				fuzzy = true,
+				fuzzy_description = "Fuzzy search projects: ",
 				choices = choices,
 				action = wezterm.action_callback(switch_logic),
 			}),

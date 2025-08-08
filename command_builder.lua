@@ -1,12 +1,13 @@
 local wezterm = require("wezterm")
-local State = require("state")
-local utils = require("utils")
+local State = require("plugins.sessionizer.state")
+local utils = require("plugins.sessionizer.utils")
 
 local M = {}
 
 -- Cache tool availability and scan results
 local _has_fd = nil
 local _scan_cache = {}
+local _meta_lookup = {}
 
 -- Check for `fd` binary without spawning full shell
 local function has_fd()
@@ -52,7 +53,6 @@ function M.build_cmd(base)
 	return cmd
 end
 
--- Scan the base directory and return a structured list of paths
 function M.scan_base(base)
 	local key = base.path .. ":" .. (base.max_depth or "default")
 	if _scan_cache[key] then
@@ -65,18 +65,30 @@ function M.scan_base(base)
 		return {}
 	end
 
-	local res = {}
+	local choices = {}
+
 	for _, line in ipairs(wezterm.split_by_newlines(out)) do
-		table.insert(res, {
-			id = line,
-			label = line:gsub(wezterm.home_dir, "~"),
-			workspace = utils.basename(line), -- used for workspace naming
-			title = utils.basename(line), -- optional: used for tab titles
+		local id = line
+		local label = line:gsub(wezterm.home_dir, "~")
+
+		table.insert(choices, {
+			id = id,
+			label = label,
 		})
+
+		-- store metadata separately
+		_meta_lookup[id] = {
+			workspace = utils.basename(line),
+			title = utils.basename(line),
+			path = line,
+		}
 	end
 
-	_scan_cache[key] = res
-	return res
+	_scan_cache[key] = choices
+	return choices
 end
+
+-- Export metadata so other modules (like ui.lua) can use it
+M.meta_lookup = _meta_lookup
 
 return M

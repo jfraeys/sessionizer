@@ -1,5 +1,5 @@
 local wezterm = require("wezterm")
-local State = require("state")
+local State = require("plugins.sessionizer.state")
 
 local M = {}
 

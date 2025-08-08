@@ -1,7 +1,7 @@
 local wezterm = require("wezterm")
-local state = require("sessionizer.state")
-local ui = require("sessionizer.ui")
-local workspaces = require("sessionizer.workspaces")
+local state = require("plugins.sessionizer.state")
+local ui = require("plugins.sessionizer.ui")
+local workspaces = require("plugins.sessionizer.workspaces")
 
 local M = {}
 

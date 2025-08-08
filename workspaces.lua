@@ -1,7 +1,7 @@
 local wezterm = require("wezterm")
-local state = require("state")
-local command_builder = require("command_builder")
-local utils = require("utils")
+local state = require("plugins.sessionizer.state")
+local command_builder = require("plugins.sessionizer.command_builder")
+local utils = require("plugins.sessionizer.utils")
 
 local M = {}
 
