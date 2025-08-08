@@ -21,7 +21,7 @@ end
 function M.build_cmd(base)
 	local path, depth = base.path, base.max_depth
 	local fd_d, find_d = utils.depth_flags(depth)
-	local excl = utils.get_exclude_flags()
+	local excl = utils.get_exclude_flags() or {}
 
 	if State.is_windows then
 		return { "Get-ChildItem", "-Path", path, "-Directory", table.unpack(excl) }
